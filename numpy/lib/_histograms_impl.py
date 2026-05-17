@@ -985,13 +985,14 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     try:
         # Sample is an ND-array.
-        _, D = sample.shape
+        N, D = sample.shape
     except (AttributeError, ValueError):
         # Sample is a sequence of 1D arrays.
         sample = np.atleast_2d(sample).T
-        _, D = sample.shape
+        N, D = sample.shape
 
     nbin = np.empty(D, np.intp)
+    uniform_bins = D * [None]
     edges = D * [None]
     dedges = D * [None]
     if weights is not None:
@@ -1023,39 +1024,82 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     # Create edge arrays
     for i in _range(D):
-        edges[i], _ = _get_bin_edges(sample[:, i], bins[i], range[i], weights)
+        edges[i], uniform_bins[i] = _get_bin_edges(sample[:, i], bins[i], range[i],
+                                                   weights)
         nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
         dedges[i] = np.diff(edges[i])
 
-    # Compute the bin number each sample falls into.
-    Ncount = tuple(
-        # avoid np.digitize to work around gh-11022
-        np.searchsorted(edges[i], sample[:, i], side='right')
-        for i in _range(D)
+    BLOCK = 65536
+
+    simple_weights = (
+        weights is None or
+        np.can_cast(weights.dtype, np.double) or
+        np.can_cast(weights.dtype, complex)
     )
+    all_uniform = all(x is not None for x in uniform_bins)
 
-    # Using digitize, values that fall on an edge are put in the right bin.
-    # For the rightmost bin, we want values equal to the right edge to be
-    # counted in the last bin, and not as an outlier.
-    for i in _range(D):
-        # Find which points are on the rightmost edge.
-        on_edge = (sample[:, i] == edges[i][-1])
-        # Shift these points one bin to the left.
-        Ncount[i][on_edge] -= 1
+    hist = np.zeros(nbin.prod(), dtype=float)
 
-    # Compute the sample indices in the flattened histogram matrix.
-    # This raises an error if the array is too large.
-    xy = np.ravel_multi_index(Ncount, nbin)
+    if all_uniform and simple_weights:
+        for i in _range(0, N, BLOCK):
+            chunk = sample[i:i + BLOCK]
+            chunk_w = weights[i:i + BLOCK] if weights is not None else None
 
-    # Compute the number of repetitions in xy and assign it to the
-    # flattened histmat.
-    hist = np.bincount(xy, weights, minlength=nbin.prod())
+            keep = np.ones(len(chunk), dtype=bool)
+            for i in _range(D):
+                ub = uniform_bins[i]
+                keep &= (chunk[:, i] >= ub[0])
+                keep &= (chunk[:, i] <= ub[1])
+            if not np.logical_and.reduce(keep):
+                chunk = chunk[keep]
+                if chunk_w is not None:
+                    chunk_w = chunk_w[keep]
 
-    # Shape into a proper matrix
+            if len(chunk) == 0:
+                continue
+
+            Ncount_chunk = []
+            for i in _range(D):
+                ub = uniform_bins[i]
+                first_edge, last_edge, n_equal = ub
+                col = chunk[:, i].astype(edges[i].dtype, copy=False)
+
+                norm_denom = _unsigned_subtract(last_edge, first_edge)
+                f_indices = (
+                    _unsigned_subtract(col, first_edge) / norm_denom * n_equal
+                )
+                indices = f_indices.astype(np.intp)
+
+                indices[indices == n_equal] -= 1
+
+                decrement = col < edges[i][indices]
+                indices[decrement] -= 1
+                increment = (col >= edges[i][indices + 1]) & (indices != n_equal - 1)
+                indices[increment] += 1
+
+                indices += 1
+                Ncount_chunk.append(indices)
+
+            xy = np.ravel_multi_index(tuple(Ncount_chunk), nbin)
+            hist += np.bincount(xy, chunk_w, minlength=nbin.prod())
+
+    else:
+        for start in _range(0, N, BLOCK):
+            chunk = sample[start:start + BLOCK]
+            chunk_w = weights[start:start + BLOCK] if weights is not None else None
+
+            Ncount_chunk = tuple(
+                np.searchsorted(edges[i], chunk[:, i], side='right')
+                for i in _range(D)
+            )
+            for i in _range(D):
+                on_edge = (chunk[:, i] == edges[i][-1])
+                Ncount_chunk[i][on_edge] -= 1
+
+            xy = np.ravel_multi_index(Ncount_chunk, nbin)
+            hist += np.bincount(xy, chunk_w, minlength=nbin.prod())
+
     hist = hist.reshape(nbin)
-
-    # This preserves the (bad) behavior observed in gh-7845, for now.
-    hist = hist.astype(float, casting='safe')
 
     # Remove outliers (indices 0 and -1 for each dimension).
     core = D * (slice(1, -1),)
