@@ -1025,7 +1025,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     nbin = np.empty(D, np.intp)
     uniform_bins = D * [None]
-    edges = D * [None]
+    bin_edges = D * [None]
     dedges = D * [None]
     if weights is not None:
         weights = np.asarray(weights)
@@ -1056,10 +1056,10 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     # Create edge arrays
     for i in _range(D):
-        edges[i], uniform_bins[i] = _get_bin_edges(sample[:, i], bins[i], range[i],
+        bin_edges[i], uniform_bins[i] = _get_bin_edges(sample[:, i], bins[i], range[i],
                                                    weights)
-        nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
-        dedges[i] = np.diff(edges[i])
+        nbin[i] = len(bin_edges[i]) + 1  # includes an outlier on each end
+        dedges[i] = np.diff(bin_edges[i])
 
     BLOCK = 65536
 
@@ -1070,66 +1070,111 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     )
     all_uniform = all(x is not None for x in uniform_bins)
 
-    hist = np.zeros(nbin.prod(), dtype=float)
+    nbin_prod = int(nbin.prod())
 
     if all_uniform and simple_weights:
-        for i in _range(0, N, BLOCK):
-            chunk = sample[i:i + BLOCK]
-            chunk_w = weights[i:i + BLOCK] if weights is not None else None
+        if D == 1:
+            # Initialize empty histogram
+            hist = np.zeros(nbin_prod, dtype=float)
+            first_edge, last_edge, n_equal_bins = uniform_bins[0]
 
-            keep = np.ones(len(chunk), dtype=bool)
-            for i in _range(D):
-                ub = uniform_bins[i]
-                keep &= (chunk[:, i] >= ub[0])
-                keep &= (chunk[:, i] <= ub[1])
-            if not np.logical_and.reduce(keep):
-                chunk = chunk[keep]
-                if chunk_w is not None:
-                    chunk_w = chunk_w[keep]
+            # Pre-compute histogram scaling factor
+            norm_denom = _unsigned_subtract(last_edge, first_edge)
+            a = sample[:, 0]
 
-            if len(chunk) == 0:
-                continue
+            # We iterate over blocks here for two reasons: the first is that for
+            # large arrays, it is actually faster (for example for a 10^8 array it
+            # is 2x as fast) and it results in a memory footprint 3x lower in the
+            # limit of large arrays.
+            for start in _range(0, N, BLOCK):
+                tmp_a = a[start:start + BLOCK]
+                tmp_w = weights[start:start + BLOCK] if weights is not None else None
 
-            Ncount_chunk = []
-            for i in _range(D):
-                ub = uniform_bins[i]
-                first_edge, last_edge, n_equal = ub
-                col = chunk[:, i].astype(edges[i].dtype, copy=False)
+                # Only include values in the right range
+                keep = (tmp_a >= first_edge)
+                keep &= (tmp_a <= last_edge)
+                if not np.logical_and.reduce(keep):
+                    tmp_a = tmp_a[keep]
+                    if tmp_w is not None:
+                        tmp_w = tmp_w[keep]
 
-                norm_denom = _unsigned_subtract(last_edge, first_edge)
+                # This cast ensures no type promotions occur below, which gh-10322
+                # make unpredictable. Getting it wrong leads to precision errors
+                # like gh-8123.
+                tmp_a = tmp_a.astype(bin_edges[0].dtype, copy=False)
+
+                # Compute the bin indices, and for values that lie exactly on
+                # last_edge we need to subtract one
                 f_indices = (
-                    _unsigned_subtract(col, first_edge) / norm_denom * n_equal
+                    _unsigned_subtract(tmp_a, first_edge) / norm_denom * n_equal_bins
                 )
                 indices = f_indices.astype(np.intp)
+                indices[indices == n_equal_bins] -= 1
 
-                indices[indices == n_equal] -= 1
-
-                decrement = col < edges[i][indices]
+                # The index computation is not guaranteed to give exactly
+                # consistent results within ~1 ULP of the bin edges.
+                decrement = tmp_a < bin_edges[0][indices]
                 indices[decrement] -= 1
-                increment = (col >= edges[i][indices + 1]) & (indices != n_equal - 1)
+                # The last bin includes the right edge. The other bins do not.
+                increment = (
+                    (tmp_a >= bin_edges[0][indices + 1]) & (indices != n_equal_bins - 1)
+                )
                 indices[increment] += 1
-
                 indices += 1
-                Ncount_chunk.append(indices)
 
-            xy = np.ravel_multi_index(tuple(Ncount_chunk), nbin)
-            hist += np.bincount(xy, chunk_w, minlength=nbin.prod())
+                # We now compute the histogram using bincount
+                hist += np.bincount(indices, tmp_w, minlength=nbin[0])
+
+        else:
+            norm_denoms = [
+                _unsigned_subtract(uniform_bins[d][1], uniform_bins[d][0])
+                for d in _range(D)
+            ]
+
+            hist = np.zeros(nbin_prod, dtype=float)
+            for start in _range(0, N, BLOCK):
+                chunk = sample[start:start + BLOCK]
+                chunk_w = weights[start:start + BLOCK] if weights is not None else None
+
+                ub0 = uniform_bins[0]
+                keep = (chunk[:, 0] >= ub0[0]) & (chunk[:, 0] <= ub0[1])
+                for d in _range(1, D):
+                    ub = uniform_bins[d]
+                    keep &= (chunk[:, d] >= ub[0])
+                    keep &= (chunk[:, d] <= ub[1])
+                if not np.logical_and.reduce(keep):
+                    chunk = chunk[keep]
+                    if chunk_w is not None:
+                        chunk_w = chunk_w[keep]
+
+                Ncount_chunk = []
+                for d in _range(D):
+                    first_edge, last_edge, n_equal_bins = uniform_bins[d]
+                    col = chunk[:, d].astype(bin_edges[d].dtype, copy=False)
+
+                    f_indices = (
+                        _unsigned_subtract(col, first_edge) / norm_denoms[d] * n_equal_bins
+                    )
+                    indices = f_indices.astype(np.intp)
+                    indices[indices == n_equal_bins] -= 1
+
+                    decrement = col < bin_edges[d][indices]
+                    indices[decrement] -= 1
+                    increment = (
+                        (col >= bin_edges[d][indices + 1]) & (indices != n_equal_bins - 1)
+                    )
+                    indices[increment] += 1
+
+                    indices += 1
+                    Ncount_chunk.append(indices)
+
+                xy = np.ravel_multi_index(tuple(Ncount_chunk), nbin)
+                hist += np.bincount(xy, chunk_w, minlength=nbin_prod)
 
     else:
-        for start in _range(0, N, BLOCK):
-            chunk = sample[start:start + BLOCK]
-            chunk_w = weights[start:start + BLOCK] if weights is not None else None
-
-            Ncount_chunk = tuple(
-                np.searchsorted(edges[i], chunk[:, i], side='right')
-                for i in _range(D)
-            )
-            for i in _range(D):
-                on_edge = (chunk[:, i] == edges[i][-1])
-                Ncount_chunk[i][on_edge] -= 1
-
-            xy = np.ravel_multi_index(Ncount_chunk, nbin)
-            hist += np.bincount(xy, chunk_w, minlength=nbin.prod())
+        hist = _histogram_searchsorted_path(
+            sample, bin_edges, nbin, nbin_prod, weights, BLOCK
+        )
 
     hist = hist.reshape(nbin)
 
@@ -1149,4 +1194,4 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     if (hist.shape != nbin - 2).any():
         raise RuntimeError(
             "Internal Shape Error")
-    return hist, edges
+    return hist, bin_edges
