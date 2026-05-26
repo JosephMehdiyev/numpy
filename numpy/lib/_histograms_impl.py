@@ -467,6 +467,55 @@ def _search_sorted_inclusive(a, v):
     ))
 
 
+def _histogram_cumulative_path(a, bin_edges, weights, ntype, BLOCK):
+    cum_n = np.zeros(bin_edges.shape, ntype)
+    if weights is None:
+        for i in _range(0, len(a), BLOCK):
+            sa = np.sort(a[i:i + BLOCK])
+            cum_n += _search_sorted_inclusive(sa, bin_edges)
+    else:
+        zero = np.zeros(1, dtype=ntype)
+        for i in _range(0, len(a), BLOCK):
+            tmp_a = a[i:i + BLOCK]
+            tmp_w = weights[i:i + BLOCK]
+            sorting_index = np.argsort(tmp_a)
+            sa = tmp_a[sorting_index]
+            sw = tmp_w[sorting_index]
+            cw = np.concatenate((zero, sw.cumsum()))
+            bin_index = _search_sorted_inclusive(sa, bin_edges)
+            cum_n += cw[bin_index]
+    return np.diff(cum_n)
+
+
+def _histogram_searchsorted_path(a, bin_edges, nbin, nbin_prod, weights, BLOCK):
+    N, D = a.shape
+    if (D + 1) * (N - BLOCK) > nbin_prod:
+        hist = np.zeros(nbin_prod, dtype=float)
+        for start in _range(0, N, BLOCK):
+            chunk = a[start:start + BLOCK]
+            chunk_w = weights[start:start + BLOCK] if weights is not None else None
+            Ncount_chunk = tuple(
+                np.searchsorted(bin_edges[i], chunk[:, i], side='right')
+                for i in _range(D)
+            )
+            for i in _range(D):
+                on_edge = (chunk[:, i] == bin_edges[i][-1])
+                Ncount_chunk[i][on_edge] -= 1
+            xy = np.ravel_multi_index(Ncount_chunk, nbin)
+            hist += np.bincount(xy, chunk_w, minlength=nbin_prod)
+    else:
+        Ncount = tuple(
+            np.searchsorted(bin_edges[i], a[:, i], side='right')
+            for i in _range(D)
+        )
+        for i in _range(D):
+            on_edge = (a[:, i] == bin_edges[i][-1])
+            Ncount[i][on_edge] -= 1
+        xy = np.ravel_multi_index(Ncount, nbin)
+        hist = np.bincount(xy, weights, minlength=nbin_prod).astype(float)
+    return hist
+
+
 def _histogram_bin_edges_dispatcher(a, bins=None, range=None, weights=None):
     return (a, bins, weights)
 
@@ -874,24 +923,7 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
                                  minlength=n_equal_bins).astype(ntype)
     else:
         # Compute via cumulative histogram
-        cum_n = np.zeros(bin_edges.shape, ntype)
-        if weights is None:
-            for i in _range(0, len(a), BLOCK):
-                sa = np.sort(a[i:i + BLOCK])
-                cum_n += _search_sorted_inclusive(sa, bin_edges)
-        else:
-            zero = np.zeros(1, dtype=ntype)
-            for i in _range(0, len(a), BLOCK):
-                tmp_a = a[i:i + BLOCK]
-                tmp_w = weights[i:i + BLOCK]
-                sorting_index = np.argsort(tmp_a)
-                sa = tmp_a[sorting_index]
-                sw = tmp_w[sorting_index]
-                cw = np.concatenate((zero, sw.cumsum()))
-                bin_index = _search_sorted_inclusive(sa, bin_edges)
-                cum_n += cw[bin_index]
-
-        n = np.diff(cum_n)
+        n = _histogram_cumulative_path(a, bin_edges, weights, ntype, BLOCK)
 
     if density:
         db = np.array(np.diff(bin_edges), float)
