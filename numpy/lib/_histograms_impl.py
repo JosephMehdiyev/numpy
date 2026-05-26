@@ -1073,12 +1073,18 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     nbin_prod = int(nbin.prod())
 
     if all_uniform and simple_weights:
+        # Fast algorithm for equal bins
+        # We now convert values of a to bin indices, under the assumption of
+        # equal bin widths (which is valid here).
+
+        # This case is more optimized as it is more specific.
         if D == 1:
             # Initialize empty histogram
             hist = np.zeros(nbin_prod, dtype=float)
             first_edge, last_edge, n_equal_bins = uniform_bins[0]
 
             # Pre-compute histogram scaling factor
+            norm_numerator = n_equal_bins
             norm_denom = _unsigned_subtract(last_edge, first_edge)
             a = sample[:, 0]
 
@@ -1086,9 +1092,9 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
             # large arrays, it is actually faster (for example for a 10^8 array it
             # is 2x as fast) and it results in a memory footprint 3x lower in the
             # limit of large arrays.
-            for start in _range(0, N, BLOCK):
-                tmp_a = a[start:start + BLOCK]
-                tmp_w = weights[start:start + BLOCK] if weights is not None else None
+            for i in _range(0, N, BLOCK):
+                tmp_a = a[i:i + BLOCK]
+                tmp_w = weights[i:i + BLOCK] if weights is not None else None
 
                 # Only include values in the right range
                 keep = (tmp_a >= first_edge)
@@ -1106,7 +1112,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
                 # Compute the bin indices, and for values that lie exactly on
                 # last_edge we need to subtract one
                 f_indices = (
-                    _unsigned_subtract(tmp_a, first_edge) / norm_denom * n_equal_bins
+                    _unsigned_subtract(tmp_a, first_edge) / norm_denom * norm_numerator
                 )
                 indices = f_indices.astype(np.intp)
                 indices[indices == n_equal_bins] -= 1
@@ -1126,31 +1132,33 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
                 hist += np.bincount(indices, tmp_w, minlength=nbin[0])
 
         else:
+            hist = np.zeros(nbin_prod, dtype=float)
+
             norm_denoms = [
                 _unsigned_subtract(uniform_bins[d][1], uniform_bins[d][0])
                 for d in _range(D)
             ]
 
-            hist = np.zeros(nbin_prod, dtype=float)
-            for start in _range(0, N, BLOCK):
-                chunk = sample[start:start + BLOCK]
-                chunk_w = weights[start:start + BLOCK] if weights is not None else None
+            for i in _range(0, N, BLOCK):
+                tmp_a = sample[i:i + BLOCK]
+                tmp_w = weights[i:i + BLOCK] if weights is not None else None
 
+                # we do this for small memory optimization
                 ub0 = uniform_bins[0]
-                keep = (chunk[:, 0] >= ub0[0]) & (chunk[:, 0] <= ub0[1])
+                keep = (tmp_a[:, 0] >= ub0[0]) & (tmp_a[:, 0] <= ub0[1])
                 for d in _range(1, D):
                     ub = uniform_bins[d]
-                    keep &= (chunk[:, d] >= ub[0])
-                    keep &= (chunk[:, d] <= ub[1])
+                    keep &= (tmp_a[:, d] >= ub[0])
+                    keep &= (tmp_a[:, d] <= ub[1])
                 if not np.logical_and.reduce(keep):
-                    chunk = chunk[keep]
-                    if chunk_w is not None:
-                        chunk_w = chunk_w[keep]
+                    tmp_a = tmp_a[keep]
+                    if tmp_w is not None:
+                        tmp_w = tmp_w[keep]
 
                 Ncount_chunk = []
                 for d in _range(D):
                     first_edge, last_edge, n_equal_bins = uniform_bins[d]
-                    col = chunk[:, d].astype(bin_edges[d].dtype, copy=False)
+                    col = tmp_a[:, d].astype(bin_edges[d].dtype, copy=False)
 
                     f_indices = (
                         _unsigned_subtract(col, first_edge) / norm_denoms[d] * n_equal_bins
@@ -1171,7 +1179,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
                 # Compute the sample indices in the flattened histogram matrix.
                 # This raises an error if the array is too large.
                 xy = np.ravel_multi_index(tuple(Ncount_chunk), nbin)
-                hist += np.bincount(xy, chunk_w, minlength=nbin_prod)
+                hist += np.bincount(xy, tmp_w, minlength=nbin_prod)
 
     else:
         hist = _histogram_searchsorted_path(
