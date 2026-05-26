@@ -487,32 +487,18 @@ def _histogram_cumulative_path(a, bin_edges, weights, ntype, BLOCK):
     return np.diff(cum_n)
 
 
-def _histogram_searchsorted_path(a, bin_edges, nbin, nbin_prod, weights, BLOCK):
-    N, D = a.shape
-    if (D + 1) * (N - BLOCK) > nbin_prod:
-        hist = np.zeros(nbin_prod, dtype=float)
-        for start in _range(0, N, BLOCK):
-            chunk = a[start:start + BLOCK]
-            chunk_w = weights[start:start + BLOCK] if weights is not None else None
-            Ncount_chunk = tuple(
-                np.searchsorted(bin_edges[i], chunk[:, i], side='right')
-                for i in _range(D)
-            )
-            for i in _range(D):
-                on_edge = (chunk[:, i] == bin_edges[i][-1])
-                Ncount_chunk[i][on_edge] -= 1
-            xy = np.ravel_multi_index(Ncount_chunk, nbin)
-            hist += np.bincount(xy, chunk_w, minlength=nbin_prod)
-    else:
-        Ncount = tuple(
-            np.searchsorted(bin_edges[i], a[:, i], side='right')
-            for i in _range(D)
-        )
-        for i in _range(D):
-            on_edge = (a[:, i] == bin_edges[i][-1])
-            Ncount[i][on_edge] -= 1
-        xy = np.ravel_multi_index(Ncount, nbin)
-        hist = np.bincount(xy, weights, minlength=nbin_prod)
+def _histogram_searchsorted_path(a, bin_edges, nbin, nbin_prod, weights):
+    _, D = a.shape
+
+    Ncount = tuple(
+        np.searchsorted(bin_edges[i], a[:, i], side='right')
+        for i in _range(D)
+    )
+    for i in _range(D):
+        on_edge = (a[:, i] == bin_edges[i][-1])
+        Ncount[i][on_edge] -= 1
+    xy = np.ravel_multi_index(Ncount, nbin)
+    hist = np.bincount(xy, weights, minlength=nbin_prod)
     return hist
 
 
@@ -1174,7 +1160,7 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     else:
         hist = _histogram_searchsorted_path(
-            sample, bin_edges, nbin, nbin_prod, weights, BLOCK
+            sample, bin_edges, nbin, nbin_prod, weights
         )
     # Shape into a proper matrix
     hist = hist.reshape(nbin)
