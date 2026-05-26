@@ -894,3 +894,116 @@ class TestHistogramdd:
         hist_dd, edges_dd = histogramdd((v,), (bins,), density=True)
         assert_equal(hist, hist_dd)
         assert_equal(edges, edges_dd[0])
+
+    def test_outliers_range(self):
+        # analogue of TestHistogram.test_outliers for multi-dimensional case.
+        a = np.arange(10) + .5  # [0.5, 1.5, ..., 9.5]
+        a_2d = np.column_stack([a, a])
+
+        h, _ = histogramdd(a_2d, bins=9, range=[(1, 10), (0, 10)])
+        assert_equal(h.sum(), 9)
+        h, _ = histogramdd(a_2d, bins=9, range=[(0, 10), (0, 9)])
+        assert_equal(h.sum(), 9)
+        h, _ = histogramdd(a_2d, bins=8, range=[(1, 9), (1, 9)])
+        assert_equal(h.sum(), 8)
+
+    def test_no_side_effects(self):
+        # histogramdd must not modify its input array
+        x = np.array([[1.3, 2.5], [2.3, 4.5], [3.5, 6.5]])
+        original = x.copy()
+        histogramdd(x, range=[[-10, 10], [-10, 10]], bins=100)
+        assert_array_equal(x, original)
+
+    def test_some_nan_values(self):
+        # analogue of TestHistogram.test_some_nan_values.
+        one_nan_2d = np.array([[0., 0.], [1., 1.], [np.nan, np.nan]])
+        all_nan_2d = np.array([[np.nan, np.nan], [np.nan, np.nan]])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', RuntimeWarning)
+            # without explicit range, NaN prevents range inference
+            assert_raises(ValueError, histogramdd, one_nan_2d, bins='auto')
+            assert_raises(ValueError, histogramdd, all_nan_2d, bins=10)
+
+            # with explicit range, NaN is silently excluded (fast path)
+            h, _ = histogramdd(one_nan_2d, bins=10, range=[(0, 2), (0, 2)])
+            assert_equal(h.sum(), 2)
+            h, _ = histogramdd(all_nan_2d, bins=10, range=[(0, 2), (0, 2)])
+            assert_equal(h.sum(), 0)
+
+            # with explicit edges (slow path), NaN is also excluded
+            h, _ = histogramdd(one_nan_2d, bins=[[0, 1, 2], [0, 1, 2]])
+            assert_equal(h.sum(), 2)
+            h, _ = histogramdd(all_nan_2d, bins=[[0, 1, 2], [0, 1, 2]])
+            assert_equal(h.sum(), 0)
+
+    def test_last_bin_inclusive_uniform(self):
+        # analogue of TestHistogram.test_last_bin_inclusive_range.
+        arr = np.array([[0., 0., 0., 1., 2., 3., 3., 4., 5.],
+                        [0., 0., 0., 1., 2., 3., 3., 4., 5.]]).T
+        hist, _ = histogramdd(arr, bins=30, range=[(-0.5, 5), (-0.5, 5)])
+        assert_equal(hist[-1, -1], 1)
+
+    def test_bin_edge_cases_uniform(self):
+        # analogue of TestHistogram.test_bin_edge_cases.
+        arr = np.array([337, 404, 739, 806, 1007, 1811, 2012], dtype=float)
+        arr_2d = np.column_stack([arr, arr])
+        hist, _ = histogramdd(arr_2d, bins=8296, range=[(2, 2280), (2, 2280)])
+        # All input points are within range and must each land in exactly one bin.
+        assert_equal(hist.sum(), len(arr))
+        assert_((hist <= 1).all())
+
+    def test_uniform_vs_searchsorted_agreement(self):
+        # The uniform fast path (int bins) and the searchsorted slow path
+        # (explicit edge arrays) must produce identical counts.
+        rng = np.random.RandomState(12345)
+        for dims in [2, 3, 4]:
+            n_bins = 20
+            data = rng.uniform(0, 10, size=(500, dims))
+            range_arg = [(0, 10)] * dims
+            bin_edges = [np.linspace(0, 10, n_bins + 1) for _ in range(dims)]
+
+            h_fast, _ = histogramdd(data, bins=n_bins, range=range_arg)
+            h_slow, _ = histogramdd(data, bins=bin_edges)
+            assert_array_equal(h_fast, h_slow,
+                               err_msg=f"Path mismatch for dims={dims}")
+
+    def test_all_outside_range(self):
+        # When every sample is outside the specified range the result is all zeros.
+        data = np.array([[1., 1.], [2., 2.], [3., 3.]])
+        h, _ = histogramdd(data, bins=5, range=[(10, 20), (10, 20)])
+        assert_equal(h.sum(), 0)
+        assert_equal(h.shape, (5, 5))
+
+    def test_large_input_chunking(self):
+        # N > BLOCK (65536) requires multiple chunk iterations; the accumulated
+        # result must equal the sum of per-chunk histograms computed separately.
+        N = 70000
+        rng = np.random.RandomState(42)
+        data = rng.uniform(0, 1, size=(N, 2))
+        range_arg = [(0, 1), (0, 1)]
+
+        h_full, _ = histogramdd(data, bins=10, range=range_arg)
+        h_part1, _ = histogramdd(data[:65536], bins=10, range=range_arg)
+        h_part2, _ = histogramdd(data[65536:], bins=10, range=range_arg)
+        assert_array_equal(h_full, h_part1 + h_part2)
+        assert_equal(h_full.sum(), N)
+
+    def test_signed_overflow_uniform(self):
+        # analogue of Histogram.test_signed_overflow_bounds.
+        for dtype in [np.byte, np.short, np.intc, np.int_, np.longlong]:
+            exponent = 8 * np.dtype(dtype).itemsize - 1
+            v = np.array([-2**exponent + 4, 2**exponent - 4], dtype=dtype)
+            arr_2d = np.column_stack([v, v])
+            hist, edges = histogramdd(arr_2d, bins=2)
+            assert_equal(edges[0], [-2**exponent + 4, 0, 2**exponent - 4])
+            assert_equal(hist[0, 0], 1)
+            assert_equal(hist[1, 1], 1)
+
+    def test_float32_data(self):
+        # analogue of TestHistogram.test_f32_rounding.
+        x = np.array([276.318359, -69.593948, 21.329449], dtype=np.float32)
+        y = np.array([5005.689453, 4481.327637, 6010.369629], dtype=np.float32)
+        data = np.column_stack([x, y])
+        hist, _ = histogramdd(data, bins=100)
+        assert_equal(hist.sum(), 3.)

@@ -467,6 +467,41 @@ def _search_sorted_inclusive(a, v):
     ))
 
 
+def _histogram_cumulative_path(a, bin_edges, weights, ntype, BLOCK):
+    cum_n = np.zeros(bin_edges.shape, ntype)
+    if weights is None:
+        for i in _range(0, len(a), BLOCK):
+            sa = np.sort(a[i:i + BLOCK])
+            cum_n += _search_sorted_inclusive(sa, bin_edges)
+    else:
+        zero = np.zeros(1, dtype=ntype)
+        for i in _range(0, len(a), BLOCK):
+            tmp_a = a[i:i + BLOCK]
+            tmp_w = weights[i:i + BLOCK]
+            sorting_index = np.argsort(tmp_a)
+            sa = tmp_a[sorting_index]
+            sw = tmp_w[sorting_index]
+            cw = np.concatenate((zero, sw.cumsum()))
+            bin_index = _search_sorted_inclusive(sa, bin_edges)
+            cum_n += cw[bin_index]
+    return np.diff(cum_n)
+
+
+def _histogram_searchsorted_path(a, bin_edges, nbin, nbin_prod, weights):
+    _, D = a.shape
+
+    Ncount = tuple(
+        np.searchsorted(bin_edges[i], a[:, i], side='right')
+        for i in _range(D)
+    )
+    for i in _range(D):
+        on_edge = (a[:, i] == bin_edges[i][-1])
+        Ncount[i][on_edge] -= 1
+    xy = np.ravel_multi_index(Ncount, nbin)
+    hist = np.bincount(xy, weights, minlength=nbin_prod)
+    return hist
+
+
 def _histogram_bin_edges_dispatcher(a, bins=None, range=None, weights=None):
     return (a, bins, weights)
 
@@ -874,24 +909,7 @@ def histogram(a, bins=10, range=None, density=None, weights=None):
                                  minlength=n_equal_bins).astype(ntype)
     else:
         # Compute via cumulative histogram
-        cum_n = np.zeros(bin_edges.shape, ntype)
-        if weights is None:
-            for i in _range(0, len(a), BLOCK):
-                sa = np.sort(a[i:i + BLOCK])
-                cum_n += _search_sorted_inclusive(sa, bin_edges)
-        else:
-            zero = np.zeros(1, dtype=ntype)
-            for i in _range(0, len(a), BLOCK):
-                tmp_a = a[i:i + BLOCK]
-                tmp_w = weights[i:i + BLOCK]
-                sorting_index = np.argsort(tmp_a)
-                sa = tmp_a[sorting_index]
-                sw = tmp_w[sorting_index]
-                cw = np.concatenate((zero, sw.cumsum()))
-                bin_index = _search_sorted_inclusive(sa, bin_edges)
-                cum_n += cw[bin_index]
-
-        n = np.diff(cum_n)
+        n = _histogram_cumulative_path(a, bin_edges, weights, ntype, BLOCK)
 
     if density:
         db = np.array(np.diff(bin_edges), float)
@@ -985,14 +1003,15 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     try:
         # Sample is an ND-array.
-        _, D = sample.shape
+        N, D = sample.shape
     except (AttributeError, ValueError):
         # Sample is a sequence of 1D arrays.
         sample = np.atleast_2d(sample).T
-        _, D = sample.shape
+        N, D = sample.shape
 
     nbin = np.empty(D, np.intp)
-    edges = D * [None]
+    uniform_bins = D * [None]
+    bin_edges = D * [None]
     dedges = D * [None]
     if weights is not None:
         weights = np.asarray(weights)
@@ -1023,34 +1042,123 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
 
     # Create edge arrays
     for i in _range(D):
-        edges[i], _ = _get_bin_edges(sample[:, i], bins[i], range[i], weights)
-        nbin[i] = len(edges[i]) + 1  # includes an outlier on each end
-        dedges[i] = np.diff(edges[i])
+        bin_edges[i], uniform_bins[i] = _get_bin_edges(sample[:, i], bins[i], range[i],
+                                                   weights)
+        nbin[i] = len(bin_edges[i]) + 1  # includes an outlier on each end
+        dedges[i] = np.diff(bin_edges[i])
 
-    # Compute the bin number each sample falls into.
-    Ncount = tuple(
-        # avoid np.digitize to work around gh-11022
-        np.searchsorted(edges[i], sample[:, i], side='right')
-        for i in _range(D)
+    BLOCK = 65536
+
+    simple_weights = (
+        weights is None or
+        np.can_cast(weights.dtype, np.double) or
+        np.can_cast(weights.dtype, complex)
     )
+    all_uniform = all(x is not None for x in uniform_bins)
 
-    # Using digitize, values that fall on an edge are put in the right bin.
-    # For the rightmost bin, we want values equal to the right edge to be
-    # counted in the last bin, and not as an outlier.
-    for i in _range(D):
-        # Find which points are on the rightmost edge.
-        on_edge = (sample[:, i] == edges[i][-1])
-        # Shift these points one bin to the left.
-        Ncount[i][on_edge] -= 1
+    nbin_prod = int(nbin.prod())
 
-    # Compute the sample indices in the flattened histogram matrix.
-    # This raises an error if the array is too large.
-    xy = np.ravel_multi_index(Ncount, nbin)
+    if all_uniform and simple_weights:
+        # Fast algorithm for equal bins
+        # We now convert values of a to bin indices, under the assumption of
+        # equal bin widths (which is valid here).
 
-    # Compute the number of repetitions in xy and assign it to the
-    # flattened histmat.
-    hist = np.bincount(xy, weights, minlength=nbin.prod())
+        # This case is more optimized as it is more specific.
+        if D == 1:
+            # Initialize empty histogram
+            hist = np.zeros(nbin_prod, dtype=float)
+            first_edge, last_edge, n_equal_bins = uniform_bins[0]
 
+            # Pre-compute histogram scaling factor
+            norm_numerator = n_equal_bins
+            norm_denom = _unsigned_subtract(last_edge, first_edge)
+            a = sample[:, 0]
+
+            # We iterate over blocks here for two reasons: the first is that for
+            # large arrays, it is actually faster (for example for a 10^8 array it
+            # is 2x as fast) and it results in a memory footprint 3x lower in the
+            # limit of large arrays.
+            for i in _range(0, N, BLOCK):
+                tmp_a = a[i:i + BLOCK]
+                tmp_w = weights[i:i + BLOCK] if weights is not None else None
+
+                # Only include values in the right range
+                keep = (tmp_a >= first_edge)
+                keep &= (tmp_a <= last_edge)
+                if not np.logical_and.reduce(keep):
+                    tmp_a = tmp_a[keep]
+                    if tmp_w is not None:
+                        tmp_w = tmp_w[keep]
+
+                # This cast ensures no type promotions occur below, which gh-10322
+                # make unpredictable. Getting it wrong leads to precision errors
+                # like gh-8123.
+                tmp_a = tmp_a.astype(bin_edges[0].dtype, copy=False)
+
+                # Compute the bin indices, and for values that lie exactly on
+                # last_edge we need to subtract one
+                f_indices = (
+                    _unsigned_subtract(tmp_a, first_edge) / norm_denom * norm_numerator
+                )
+                indices = f_indices.astype(np.intp)
+                indices[indices == n_equal_bins] -= 1
+
+                # The index computation is not guaranteed to give exactly
+                # consistent results within ~1 ULP of the bin edges.
+                decrement = tmp_a < bin_edges[0][indices]
+                indices[decrement] -= 1
+                # The last bin includes the right edge. The other bins do not.
+                increment = (
+                    (tmp_a >= bin_edges[0][indices + 1]) & (indices != n_equal_bins - 1)
+                )
+                indices[increment] += 1
+                indices += 1
+
+                # We now compute the histogram using bincount
+                hist += np.bincount(indices, tmp_w, minlength=nbin[0])
+
+        else:
+            ub = uniform_bins[0]
+            keep = (sample[:, 0] >= ub[0])
+            keep &= (sample[:, 0] <= ub[1])
+            for d in _range(1, D):
+                ub = uniform_bins[d]
+                keep &= (sample[:, d] >= ub[0])
+                keep &= (sample[:, d] <= ub[1])
+            if not np.logical_and.reduce(keep):
+                sample = sample[keep]
+                if weights is not None:
+                    weights = weights[keep]
+
+            Ncount = []
+            for d in _range(D):
+                first_edge, last_edge, n_equal_bins = uniform_bins[d]
+                norm_denom = _unsigned_subtract(last_edge, first_edge)
+                col = sample[:, d].astype(bin_edges[d].dtype, copy=False)
+
+                f_indices = (
+                    _unsigned_subtract(col, first_edge) / norm_denom * n_equal_bins
+                )
+                indices = f_indices.astype(np.intp)
+                indices[indices == n_equal_bins] -= 1
+
+                decrement = col < bin_edges[d][indices]
+                indices[decrement] -= 1
+                increment = (
+                    (col >= bin_edges[d][indices + 1]) & (indices != n_equal_bins - 1)
+                )
+                indices[increment] += 1
+
+                indices += 1
+                Ncount.append(indices)
+
+            xy = np.ravel_multi_index(tuple(Ncount), nbin)
+            hist = np.bincount(xy, weights, minlength=nbin_prod)
+
+    else:
+        hist = _histogram_searchsorted_path(
+            sample, bin_edges, nbin, nbin_prod, weights
+        )
     # Shape into a proper matrix
     hist = hist.reshape(nbin)
 
@@ -1073,4 +1181,4 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
     if (hist.shape != nbin - 2).any():
         raise RuntimeError(
             "Internal Shape Error")
-    return hist, edges
+    return hist, bin_edges
