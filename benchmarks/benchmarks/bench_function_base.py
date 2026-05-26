@@ -28,8 +28,6 @@ class Histogram1D(Benchmark):
         self.edges_fine = [np.linspace(0, 100, 10001)]
         self.edges_small = [np.linspace(50, 51, 201)]
 
-    # --- np.histogram (1-D reference) ---
-
     def time_full_coverage(self):
         np.histogram(self.d, 200, (0, 100))
 
@@ -92,8 +90,7 @@ class HistogramdHighDim(Benchmark):
     ]
 
     def setup(self, dims, n_bins):
-        rng = np.random.RandomState(1234)
-        self.data = rng.uniform(0, 100, size=(100000, dims))
+        self.data = np.linspace(0, 100, 100000 * dims).reshape(100000, dims)
         self.bins_int = n_bins
         self.bins_edges = [np.linspace(0, 100, n_bins + 1) for _ in range(dims)]
         self.range_arg = [(0, 100)] * dims
@@ -113,8 +110,7 @@ class HistogramdStringBins(Benchmark):
     ]
 
     def setup(self, dims, n_samples):
-        rng = np.random.RandomState(5678)
-        self.data = rng.normal(size=(n_samples, dims))
+        self.data = np.linspace(0, 1, n_samples * dims).reshape(n_samples, dims)
 
     def time_auto_bins(self, dims, n_samples):
         np.histogramdd(self.data, bins='auto')
@@ -131,8 +127,7 @@ class HistogramdLargeN(Benchmark):
     ]
 
     def setup(self, n_samples, dims):
-        rng = np.random.RandomState(9999)
-        self.data = rng.uniform(0, 100, size=(n_samples, dims))
+        self.data = np.linspace(0, 100, n_samples * dims).reshape(n_samples, dims)
         self.bins_edges = [np.linspace(0, 100, 51) for _ in range(dims)]
         self.range_arg = [(0, 100)] * dims
 
