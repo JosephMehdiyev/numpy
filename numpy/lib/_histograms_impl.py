@@ -1118,13 +1118,9 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
                 hist += np.bincount(indices, tmp_w, minlength=nbin[0])
 
         else:
-            norm_denoms = [
-                _unsigned_subtract(uniform_bins[d][1], uniform_bins[d][0])
-                for d in _range(D)
-            ]
-
             ub = uniform_bins[0]
-            keep = (sample[:, 0] >= ub[0]) & (sample[:, 0] <= ub[1])
+            keep = (sample[:, 0] >= ub[0])
+            keep &= (sample[:, 0] <= ub[1])
             for d in _range(1, D):
                 ub = uniform_bins[d]
                 keep &= (sample[:, d] >= ub[0])
@@ -1137,10 +1133,11 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
             Ncount = []
             for d in _range(D):
                 first_edge, last_edge, n_equal_bins = uniform_bins[d]
+                norm_denom = _unsigned_subtract(last_edge, first_edge)
                 col = sample[:, d].astype(bin_edges[d].dtype, copy=False)
 
                 f_indices = (
-                    _unsigned_subtract(col, first_edge) / norm_denoms[d] * n_equal_bins
+                    _unsigned_subtract(col, first_edge) / norm_denom * n_equal_bins
                 )
                 indices = f_indices.astype(np.intp)
                 indices[indices == n_equal_bins] -= 1
