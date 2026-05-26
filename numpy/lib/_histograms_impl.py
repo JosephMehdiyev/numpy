@@ -512,7 +512,7 @@ def _histogram_searchsorted_path(a, bin_edges, nbin, nbin_prod, weights, BLOCK):
             on_edge = (a[:, i] == bin_edges[i][-1])
             Ncount[i][on_edge] -= 1
         xy = np.ravel_multi_index(Ncount, nbin)
-        hist = np.bincount(xy, weights, minlength=nbin_prod).astype(float)
+        hist = np.bincount(xy, weights, minlength=nbin_prod)
     return hist
 
 
