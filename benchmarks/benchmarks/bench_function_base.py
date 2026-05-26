@@ -22,6 +22,13 @@ class Linspace(Benchmark):
 class Histogram1D(Benchmark):
     def setup(self):
         self.d = np.linspace(0, 100, 100000)
+        # Column-vector form required by histogramdd.
+        self.d_dd = self.d[:, np.newaxis]
+        self.edges = [np.linspace(0, 100, 201)]
+        self.edges_fine = [np.linspace(0, 100, 10001)]
+        self.edges_small = [np.linspace(50, 51, 201)]
+
+    # --- np.histogram (1-D reference) ---
 
     def time_full_coverage(self):
         np.histogram(self.d, 200, (0, 100))
@@ -32,10 +39,31 @@ class Histogram1D(Benchmark):
     def time_fine_binning(self):
         np.histogram(self.d, 10000, (0, 100))
 
+    def time_dd_full_coverage(self):
+        np.histogramdd(self.d_dd, 200, [(0, 100)])
+
+    def time_dd_small_coverage(self):
+        np.histogramdd(self.d_dd, 200, [(50, 51)])
+
+    def time_dd_fine_binning(self):
+        np.histogramdd(self.d_dd, 10000, [(0, 100)])
+
+    def time_dd_slow_full_coverage(self):
+        np.histogramdd(self.d_dd, self.edges)
+
+    def time_dd_slow_small_coverage(self):
+        np.histogramdd(self.d_dd, self.edges_small)
+
+    def time_dd_slow_fine_binning(self):
+        np.histogramdd(self.d_dd, self.edges_fine)
+
 
 class Histogram2D(Benchmark):
     def setup(self):
         self.d = np.linspace(0, 100, 200000).reshape((-1, 2))
+        self.edges_full = [np.linspace(0, 100, 201), np.linspace(0, 100, 201)]
+        self.edges_small = [np.linspace(50, 51, 201), np.linspace(50, 51, 201)]
+        self.edges_fine = [np.linspace(0, 100, 10001), np.linspace(0, 100, 10001)]
 
     def time_full_coverage(self):
         np.histogramdd(self.d, (200, 200), ((0, 100), (0, 100)))
@@ -45,6 +73,74 @@ class Histogram2D(Benchmark):
 
     def time_fine_binning(self):
         np.histogramdd(self.d, (10000, 10000), ((0, 100), (0, 100)))
+
+    def time_slow_full_coverage(self):
+        np.histogramdd(self.d, self.edges_full)
+
+    def time_slow_small_coverage(self):
+        np.histogramdd(self.d, self.edges_small)
+
+    def time_slow_fine_binning(self):
+        np.histogramdd(self.d, self.edges_fine)
+
+
+class HistogramdHighDim(Benchmark):
+    param_names = ['dims', 'n_bins']
+    params = [
+        [3, 4],
+        [10, 50],
+    ]
+
+    def setup(self, dims, n_bins):
+        rng = np.random.RandomState(1234)
+        self.data = rng.uniform(0, 100, size=(100000, dims))
+        self.bins_int = n_bins
+        self.bins_edges = [np.linspace(0, 100, n_bins + 1) for _ in range(dims)]
+        self.range_arg = [(0, 100)] * dims
+
+    def time_uniform_fast_path(self, dims, n_bins):
+        np.histogramdd(self.data, bins=self.bins_int, range=self.range_arg)
+
+    def time_searchsorted_slow_path(self, dims, n_bins):
+        np.histogramdd(self.data, bins=self.bins_edges)
+
+
+class HistogramdStringBins(Benchmark):
+    param_names = ['dims', 'n_samples']
+    params = [
+        [1, 2, 3],
+        [1000, 10000],
+    ]
+
+    def setup(self, dims, n_samples):
+        rng = np.random.RandomState(5678)
+        self.data = rng.normal(size=(n_samples, dims))
+
+    def time_auto_bins(self, dims, n_samples):
+        np.histogramdd(self.data, bins='auto')
+
+    def time_fd_bins(self, dims, n_samples):
+        np.histogramdd(self.data, bins='fd')
+
+
+class HistogramdLargeN(Benchmark):
+    param_names = ['n_samples', 'dims']
+    params = [
+        [100000, 500000],
+        [2, 3],
+    ]
+
+    def setup(self, n_samples, dims):
+        rng = np.random.RandomState(9999)
+        self.data = rng.uniform(0, 100, size=(n_samples, dims))
+        self.bins_edges = [np.linspace(0, 100, 51) for _ in range(dims)]
+        self.range_arg = [(0, 100)] * dims
+
+    def time_uniform_fast_path(self, n_samples, dims):
+        np.histogramdd(self.data, bins=50, range=self.range_arg)
+
+    def time_searchsorted_slow_path(self, n_samples, dims):
+        np.histogramdd(self.data, bins=self.bins_edges)
 
 
 class Bincount(Benchmark):
