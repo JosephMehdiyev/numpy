@@ -1168,6 +1168,8 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
                     indices += 1
                     Ncount_chunk.append(indices)
 
+                # Compute the sample indices in the flattened histogram matrix.
+                # This raises an error if the array is too large.
                 xy = np.ravel_multi_index(tuple(Ncount_chunk), nbin)
                 hist += np.bincount(xy, chunk_w, minlength=nbin_prod)
 
@@ -1175,8 +1177,11 @@ def histogramdd(sample, bins=10, range=None, density=None, weights=None):
         hist = _histogram_searchsorted_path(
             sample, bin_edges, nbin, nbin_prod, weights, BLOCK
         )
-
+    # Shape into a proper matrix
     hist = hist.reshape(nbin)
+
+    # This preserves the (bad) behavior observed in gh-7845, for now.
+    hist = hist.astype(float, casting='safe')
 
     # Remove outliers (indices 0 and -1 for each dimension).
     core = D * (slice(1, -1),)
